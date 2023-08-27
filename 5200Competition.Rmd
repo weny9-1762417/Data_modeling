@@ -1,0 +1,374 @@
+---
+title: "5300 Predictive Analysis Competition"
+author: "Vivian Wen"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55), tidy = TRUE)
+```
+
+## Database setup:
+
+Read database 'songs' and 'scoring data' from directory:
+
+```{r}
+songs = read.csv('C:/Users/vivia/OneDrive/桌面/APAN5200/analysisData.csv')
+scoringData = read.csv('C:/Users/vivia/OneDrive/桌面/APAN5200/scoringData.csv')
+```
+
+The initial model given by professor:
+```{r}
+model = lm(rating~ tempo+time_signature,songs)
+pred = predict(model,newdata=scoringData)
+```
+
+
+## Unsuccessful Models I have tried:
+
+The linear regression model:
+```{r}
+model1 = lm(rating~time_signature+tempo+track_duration+danceability+acousticness+valence+loudness+speechiness,songs)
+summary(model1)
+pred1 = predict(model1,newdata=scoringData)
+```
+
+regression models are not good without solve for Multicollinearity and heteroskedasticity.
+
+However, the variables do contain some correlations between variables.
+
+```{r}
+cor(songs$rating, songs$danceability) #0.1388896
+cor(songs$rating, songs$energy) #0.1024138
+cor(songs$rating, songs$time_signature) #0.09239721
+cor(songs$rating, songs$tempo) #0.0126714
+cor(songs$rating, songs$valence) #-0.09392114
+cor(songs$rating, songs$track_duration) #0.1467323
+cor(songs$rating, songs$track_explicit) #0.1454988
+cor(songs$track_duration, songs$track_explicit) #0.03321112
+cor(songs$rating, songs$instrumentalness) #-0.08836823
+cor(songs$rating, songs$energy) #0.1024138
+cor(songs$rating, songs$key) #0.001075925
+cor(songs$rating, songs$loudness) #0.1964508
+cor(songs$rating, songs$speechiness) #0.07675559
+cor(songs$rating, songs$acousticness) #-0.1978989
+cor(songs$rating, songs$liveness) #-0.05878034
+cor(songs$energy, songs$loudness) #0.6807528
+cor(songs$time_signature, songs$tempo) #-0.01463417
+cor(songs$danceability, songs$acousticness) #-0.3140044
+cor(songs$liveness, songs$loudness) #0.04015022
+```
+
+The Fitting Generalized Linear Model:
+```{r}
+model2 = glm(rating~danceability+acousticness+valence+loudness, data = songs)
+summary(model2)
+pred2 = predict(model2,newdata=scoringData)
+```
+
+Use generalized additive model:
+```{r}
+library(mgcv)
+model4 = gam(rating~time_signature+energy+tempo+track_duration+track_explicit+danceability+s(acousticness)+s(instrumentalness)+valence+loudness+energy+liveness, method = 'REML', data = songs)
+summary(model4)
+pred4 = predict(model4,newdata=scoringData)
+```
+
+
+Use variables with random forest(without data tidying):
+```{r}
+library(randomForest)
+#library(tidyverse)
+set.seed(1031)
+model3 = randomForest(rating~time_signature+energy+mode+tempo+track_duration+track_explicit+danceability+acousticness+valence+loudness+speechiness+liveness+instrumentalness+key,data = songs, importance = TRUE)
+pred3 = predict(model3,newdata=scoringData)
+```
+
+
+Use rpart model(but the result is not good compare to random forest:
+```{r}
+library(rpart)
+
+tree1 = rpart(rating~time_signature+energy+mode+tempo+track_duration+track_explicit+danceability+acousticness+valence+loudness+speechiness+liveness+instrumentalness+key,data = songs, method = 'anova', control= rpart.control(cp=0.0001))
+pred_tree = predict(tree1,newdata=scoringData, type='vector')
+```
+
+Try forest ranger:
+```{r}
+library(ranger)
+library(caret)
+
+set.seed(1031)
+forest_ranger = ranger(rating~time_signature+energy+mode+tempo+track_duration+track_explicit+danceability+acousticness+valence+loudness+speechiness+liveness+instrumentalness+key,
+                       data = songs, 
+                       num.trees = 1000)
+pred_train = predict(forest_ranger, data=scoringData, num.trees = 1000)
+#15.15955
+
+```
+
+Tried tuned ranger but didn't run a result:
+```{r}
+trControl=trainControl(method="cv",number=5)
+tuneGrid = expand.grid(mtry= 1:10, 
+                       splitrule = c('variance','extratrees','maxstat'), 
+                       min.node.size = c(2,3,4,5,10))
+set.seed(1031)
+cvModel = train(rating~time_signature+mode+tempo+track_duration+track_explicit+danceability+acousticness+valence+loudness+speechiness+liveness+instrumentalness+key,
+                data=songs,
+                method="ranger",
+                num.trees=1000,
+                trControl=trControl,
+                tuneGrid=tuneGrid)
+cvModel$bestTune
+```
+
+
+```{r}
+set.seed(1031)
+cv_forest_ranger = ranger(rating~time_signature+mode+tempo+track_duration+track_explicit+danceability+acousticness+valence+loudness+speechiness+liveness+instrumentalness+key,
+                          data=songs,
+                          num.trees = 1000, 
+                          mtry=cvModel$bestTune$mtry, 
+                          min.node.size = cvModel$bestTune$min.node.size, 
+                          splitrule = cvModel$bestTune$splitrule)
+
+pred_forest_ranger = predict(cv_forest_ranger, data = scoringData, num.trees = 1000)
+#15.20061
+```
+
+
+
+
+Then, I found out it would be better if I can do some data tidying and seperate the genre column to dummy variables.
+So, I began to do some data tidying with genre column:
+
+### Step1: Data Tidying: clean and managing the genre column into dummy variables and to various columns
+
+1. clean the format of genre column from both songs and scoringData datasets, and make them into matrix.
+
+```{r}
+songs$genre <- gsub("\\[|\\]", "", songs$genre)
+songs$genre <- gsub("'","",songs$genre)
+songs$genre <- gsub("-"," ",songs$genre)
+
+x  <- strsplit(songs$genre, ",")
+x1 <- unique(unlist(x))
+genres <- t(sapply(x,function(z)table(factor(z,levels=x1))))
+
+
+scoringData$genre <- gsub("\\[|\\]", "", scoringData$genre)
+scoringData$genre <- gsub("'","",scoringData$genre)
+scoringData$genre <- gsub("-"," ",scoringData$genre)
+
+a  <- strsplit(scoringData$genre, ",")
+a1 <- unique(unlist(a))
+genres_test <- t(sapply(a,function(z)table(factor(z,levels=a1))))
+
+```
+
+2. Merge the dummy variables into dataframe. Note that I did not use all genre types but I chose to only use count greater than and equal to 5.
+```{r}
+library(dplyr)
+library(tidyr)
+library(janitor)
+
+colnames(genres) <- trimws(colnames(genres), whitespace = "[\\h\\v]")
+colnames(genres) <- gsub("\"","",colnames(genres))
+genres = as.data.frame(genres)
+
+merged_genres <- as.data.frame(t(apply(genres,1, function(x) tapply(x,colnames(genres),sum))))
+colnames(merged_genres) <- gsub(" ","_",colnames(merged_genres))
+merged_genres <- merged_genres %>%
+  clean_names()
+
+sum_genre <- colSums(merged_genres)
+
+# for scoring Data:
+colnames(genres_test) <- trimws(colnames(genres_test), whitespace = "[\\h\\v]")
+colnames(genres_test) <- gsub("\"","",colnames(genres_test))
+genres_test = as.data.frame(genres_test)
+
+merged_genres_test <- as.data.frame(t(apply(genres_test,1, function(x) tapply(x,colnames(genres_test),sum))))
+colnames(merged_genres_test) <- gsub(" ","_",colnames(merged_genres_test))
+merged_genres_test <- merged_genres_test %>%
+  clean_names()
+
+
+colname1 <- colnames(merged_genres)
+colname2 <- colnames(merged_genres_test)
+common_col <- intersect(colname1, colname2)
+
+
+good_genres <- merged_genres[, common_col]
+colnames(good_genres) <- gsub(" ", "_", colnames(good_genres))
+
+good_genres_test <- merged_genres_test[, common_col]
+colnames(good_genres_test) <- gsub(" ", "_", colnames(good_genres_test))
+
+genres_greater20 <- good_genres[, colSums(good_genres) >= 5]
+genres_test_greater20 <- good_genres_test[, colSums(good_genres_test) >= 5]
+
+
+genreName1 <- colnames(genres_greater20)
+genreName2 <- colnames(genres_test_greater20)
+intersectionCol <- intersect(genreName1, genreName2)
+
+top_genre1 <- genres_greater20[, intersectionCol]
+top_genre2 <- genres_test_greater20[, intersectionCol]
+
+```
+
+
+### The model I ran after data tidying with the genre column only:
+
+```{r}
+library(ranger)
+set.seed(1031)
+forest_ranger4 = ranger(selected_formula,
+                       data = songs_sum, 
+                       num.trees = 1000)
+pred_forest_ranger4 = predict(forest_ranger4, data=scoringData_sum, num.trees = 1000)
+```
+
+
+## Later, I found out there could be better perdictions when I did both data tidying for genre and performer columns together:
+### Data tidying with performer column:
+
+```{r}
+songs$performer <- gsub("'","",songs$performer)
+songs$performer <- gsub(" ","_",songs$performer)
+songs$performer <- gsub("\\(|\\)","",songs$performer)
+songs$performer <- gsub("\\[|\\]", "", songs$performer)
+
+
+c = strsplit(songs$performer,'_Featuring_|_featuring_|_,_|_with_|_With_|_And_|_&_|&|,_')
+c1 <- unique(unlist(c))
+performer <- t(sapply(c,function(z)table(factor(z,levels=c1))))
+performer <- as.data.frame(performer)
+sum_singer = rowSums(performer)
+
+#For "Scoring Data":
+scoringData$performer <- gsub("'","",scoringData$performer)
+scoringData$performer <- gsub("'", "_", scoringData$performer)
+scoringData$performer <- gsub("\\(|\\)","",scoringData$performer)
+scoringData$performer <- gsub("\\[|\\]", "", scoringData$performer)
+
+d = strsplit(scoringData$performer,'_Featuring_|_featuring_|_,_|_with_|_With_|_And_|_&_|&|,_')
+d1 <- unique(unlist(d))
+performer_test <- t(sapply(d,function(z)table(factor(z,levels=d1))))
+
+
+colnames(performer_test) <- trimws(colnames(performer_test), whitespace = "[\\h\\v]")
+colnames(performer_test) <- gsub("\"","",colnames(performer_test))
+performer_test = as.data.frame(performer_test)
+
+library(dplyr)
+library(tidyr)
+library(janitor)
+performer <- performer %>%
+  clean_names()
+
+performer_test <- performer_test %>%
+  clean_names()
+
+colname1p <- colnames(performer)
+colname2p <- colnames(performer_test)
+common_colp <- intersect(colname1p, colname2p)
+
+
+good_performer <- performer[, common_colp]
+colnames(good_performer) <- gsub(" ", "_", colnames(good_performer))
+
+good_performer_test <- performer_test[, common_colp]
+colnames(good_performer_test) <- gsub(" ", "_", colnames(good_performer_test))
+
+df1 <- performer[, common_colp]
+df2 <- performer_test[, common_colp]
+
+top_df1 <- good_performer[, colSums(df1) > 5]
+top_df2 <- good_performer_test[, colSums(df2) > 5]
+top <- colnames(top_df1)
+top2 <- colnames(top_df2)
+top_intersact <- intersect(top,top2)
+
+top_perform1 <- top_df1[, top_intersact]
+top_perform2 <- top_df2[, top_intersact]
+
+```
+
+```{r}
+songs_sum <- cbind.data.frame(songs, top_genre1, top_perform1)
+
+songs_sum <- songs_sum %>%
+  relocate(rating, .after = last_col())
+
+scoringData_sum <- cbind.data.frame(scoringData, top_genre2, top_perform2)
+```
+
+
+### Formula for predictive model
+```{r}
+name <- c('track_duration', 'track_explicit', 'danceability', 'energy',
+                'key','loudness', 'mode', 'speechiness', 'acousticness',
+                'instrumentalness', 'liveness', 'valence',
+                'tempo', 'time_signature', intersectionCol, top_intersact)
+Formula <- formula(paste("rating~", 
+     paste(name, collapse="+")))
+
+```
+
+### I tried to do feature selction with my forest ranger model, but the results is not good as my model without feature selection.
+```{r}
+library(randomForestSRC)
+ rf <- rfsrc(Formula, data = songs_sum)
+important <- vimp(rf)$importance
+name_important <- names(important)
+
+Formula2 <- formula(paste("rating~", 
+     paste(name_important, collapse="+")))
+
+
+library(ranger)
+library(caret)
+library(ggplot2)
+
+set.seed(1031)
+forest_ranger = ranger(Formula2,
+                       data = songs_sum, 
+                       num.trees = 12000)
+
+pred_forest_ranger = predict(forest_ranger, data=scoringData_sum, num.trees = 12000)
+
+```
+
+
+## The best model with lowest RMSE in Kaggle
+```{r}
+#Forest Ranger with new model:forest_ranger2
+
+library(ranger)
+library(caret)
+library(ggplot2)
+
+set.seed(1031)
+forest_ranger = ranger(Formula,
+                       data = songs_sum, 
+                       num.trees = 12000)
+
+pred_forest_ranger = predict(forest_ranger, data=scoringData_sum, num.trees = 12000)
+
+```
+
+
+## The RMSE calculation formula I have used:
+```{r}
+rmse = sqrt(mean(pred_forest_ranger$predictions-songs_sum$rating)^2)
+rmse
+```
+
+## Create output with predictions:
+```{r}
+submissionFile = data.frame(id = scoringData$id, rating = pred_forest_ranger$predictions)
+write.csv(submissionFile, 'C:/Users/vivia/OneDrive/桌面/APAN5200/submissionFile_Vivian.csv',row.names = F)
+```
